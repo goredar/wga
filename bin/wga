@@ -1,0 +1,176 @@
+#!/usr/bin/env ruby
+
+# Add lib directory to load path
+lib = File.expand_path(File.dirname(__FILE__) + '/../lib')
+$LOAD_PATH.unshift(lib) if File.directory?(lib) && !$LOAD_PATH.include?(lib)
+
+require 'bundler/setup'
+require 'wga/version'
+require 'optparse'
+require 'goredar/logger'
+require 'oj'
+
+# Default options
+default_conf = File.expand_path "~/.config/l1.conf"
+default_script_dir = File.expand_path "~/.config/wga_scripts"
+sample_conf = File.expand_path(File.dirname(__FILE__) + '/../l1.conf.sample')
+options = {
+  :commands => [],
+  :script_dir => [],
+  :hosts => [],
+  :scripts => [],
+  :triggers => [],
+  :triggers_json => [],
+  :config => default_conf,
+  :self_name => Wga::NAME,
+  :log_level => [],
+}
+
+# Parse options
+
+op = OptionParser.new do |opts|
+  opts.banner = %Q{Usage: #{options[:self_name]} [options] host1 | trigger1 [host2 trigger2 ...]}
+  # App
+  opts.on("-l", "--list", "List scripts") { options[:list_scripts] = true }
+  opts.on("-u", "--update", "Update scripts") { options[:update_scripts] = true }
+  opts.on("--install", "Install default config file to #{default_conf}") do
+    FIX ||= false
+    require 'wga'
+    options[:install] = true
+    Wga.install_global_config sample_conf, default_conf
+  end
+  # Input
+  opts.on("-h", "--host HOSTS", "Hosts to process (comma-separated)") do |hosts|
+    hosts.split(',').each { |host| options[:hosts] << host }
+  end
+  opts.on("-s", "--script SCRIPTS", "Execute specified SCRIPTS (comma-separated)") do |scripts|
+    scripts.split(',').each { |s| options[:scripts] << s.to_sym }
+  end
+  opts.on("-f", "--fix", "Trigger execution of recovering script's commands (if any) on server (potentially dangerous)") do
+    FIX = true
+  end
+  opts.on("-t", "--trigger TRIGGERS", "Execute script corresponding to a given TRIGGERS (comma-separated)") do |triggers|
+    triggers.split(',').each { |t| options[:triggers] << t }
+  end
+  # Issue
+  opts.on("-i", "--issue [ISSUE]", "Post results of script execution to issue (currently jira)" ) do |issue|
+    options[:issue] = issue ? issue : :new
+  end
+  opts.on("--issue-type [TYPE]", "Override default issue type (wgmnt, hdwr)" ) do |type|
+    options[:issue_type] = type ? type.to_sym : :default
+  end
+  opts.on("--hdwr", "Set issue type to HDWR" ) do
+    options[:issue_type] = :hdwr
+  end
+  opts.on("-a", "--add-info", "Add hosts and triggers info to issue's comment" ) do
+    options[:add_info_to_comment] = true
+  end
+  opts.on("-c", "--comment MESSAGE", "Add custom message to issue's comment" ) do |message|
+    options[:comment] = message
+  end
+  opts.on("--ack [MESSAGE]", "Set ack to triggers events (default is jira issue link)" ) do |message|
+    options[:ack] = message || :issue
+  end
+  # Output
+  opts.on("-p", "--progress", "Show progress during execution") { options[:log_level] << Logger::INFO }
+  opts.on("-j", "--jira", "Format output for jira") { |format| options[:format] = :jira }
+  # Config
+  opts.on("--config CONFIG", "Grab configuration from CONFIG file") do |config|
+    options[:config] = config
+  end
+  opts.on("-d", "--script-dir DIRS", "Search for scripts in DIRS (comma-separated)") do |dirs|
+    dirs.split(',').each { |d| options[:script_dir] << d }
+  end
+  # Misc
+  opts.on("-v", "--version", "Show version") do
+    puts "#{options[:self_name]}: #{Wga::VERSION}"
+    exit
+  end
+  opts.on("--debug", "Show debug messages") { options[:log_level] << Logger::DEBUG }
+  opts.on("--noop", "Dry run") { NOOP = true }
+  opts.on_tail("--help", "Show this message") do
+    puts opts
+    exit
+  end
+end
+
+LOG ||= Goredar::Logger.new STDERR
+
+begin
+  op.parse!
+rescue SystemExit
+  exit 0
+rescue Exception => e
+  LOG.error "[app] #{e.message}"
+  puts op
+  exit 1
+end
+
+FIX ||= false
+NOOP ||= false
+
+require 'wga'
+
+(CONF = Wga.load_global_config(options[:config])) || exit(1)
+
+# Select log level
+options[:log_level] << Logger::INFO if CONF[:wga][:progress]
+LOG.level = options[:log_level].min
+
+# Combine pipeline and commandline arguments
+args = $stdin.tty? ? ARGV : ARGV + $stdin.readlines
+args.each do |line|
+  line = line.chomp
+  begin
+    entry = Oj.load line
+    next unless entry.has_key? "triggerid"
+    options[:triggers_json] << entry
+  rescue
+    line.include?(' ') ? options[:triggers] << line : options[:hosts] << line
+  end
+end
+options[:triggers_json].compact! if options[:triggers_json].is_a?(Array)
+
+LOG.debug "[app] Got following scripts: #{options[:scripts]}."
+LOG.debug "[app] Got following triggers: #{options[:triggers]}."
+LOG.debug "[app] Got following triggers as JSON: #{options[:triggers_json]}."
+LOG.debug "[app] Got following hosts: #{options[:hosts]}."
+
+options[:format] ||= CONF[:wga][:format]
+LOG.debug "[app] Using following default output format: #{options[:format]}."
+
+# Define scripts directory
+if options[:script_dir].empty?
+  options[:script_dir] = (CONF[:wga][:script_dir].empty? rescue [default_script_dir]) || [default_script_dir]
+end
+#options[:script_dir] << File.dirname(__FILE__) + '/../script'
+#options[:script_dir] << './'
+options[:script_dir].map! { |x| File.expand_path x }
+options[:script_dir].uniq!
+LOG.debug "[app] Using following script directories: #{options[:script_dir]}."
+
+if options[:install]
+  Wga.install_scripts default_script_dir
+  exit
+end
+
+if options[:update_scripts]
+  Wga.update_scripts options[:script_dir]
+  exit
+end
+
+if options[:list_scripts]
+  list = Wga.list_scripts options[:script_dir]
+  list.empty? || puts(list)
+  exit
+end
+
+all_opts = [:scripts, :triggers, :triggers_json, :hosts].reduce([]) do |memo, opts_name|
+  memo + options[opts_name]
+end
+if all_opts.empty?
+  LOG.warn "[app] Nothing to do. Exiting."
+  exit
+end
+
+Wga.run_scripts options

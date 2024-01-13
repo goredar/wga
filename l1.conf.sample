@@ -1,0 +1,39 @@
+# Move it to ~/.l1.conf
+---
+:confluence:
+  :url: https://confluence
+:jira:
+  :url: https://jira
+:zabbix:
+  :url: https://zabbix
+:cmdb:
+  :url: https://cmdb
+  :role: L1
+:clusters:
+  :url: https://clusters
+:user: user
+:pass: pass
+:wga:
+  :script_url: https://script
+  :script_dir:
+    - ~/.config/wga_scripts
+  :issue_system: jira
+  :ssh_user: support
+  :ssh_port: 2200
+  :ssh_connect_timeout: 12
+  :command_timeout: 96
+  :format: console
+  :progress: true
+:wgh:
+  :mongo:
+    :host:
+      - localhost
+    :db: host_info
+  :curl:
+    :connect_timeout: 4
+    :timeout: 96
+:wgz:
+  :use_cache: true
+  :socket: /tmp/wgz.sock
+  :update_interval: 64
+  :stale_threshold : 128
